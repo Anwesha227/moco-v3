@@ -144,9 +144,39 @@ parser.add_argument('--crop-min', default=0.08, type=float,
                     help='minimum scale for random cropping (default: 0.08)')
 
 
-def main(args):
+def main():
+    args = parser.parse_args()
 
-    # args = parser.parse_args()
+    if args.output_dir:
+        Path(args.output_dir).mkdir(parents=True, exist_ok=True)
+
+    args.log_dir = os.path.join(args.output_dir, 'log')
+    Path(args.log_dir).mkdir(parents=True, exist_ok=True)
+
+    # read the dataset and retrieved path from the config.yml file
+    with open('../SWAT/config.yml') as f:
+        config = yaml.load(f, Loader=yaml.FullLoader)
+        args.dataset_path = config['dataset_path']
+        args.retrieved_path = config['retrieved_path']
+    
+    args.dataset_root = f'../SWAT/data/{args.dataset}'
+
+    print(f'args.dataset_root: {args.dataset_root}')
+    print(f'args.dataset_path: {args.dataset_path}')
+    print(f'args.retrieved_path: {args.retrieved_path}')
+
+    args.train_split = [
+        [
+        # f'fewshot{args.shots}_seed{args.seed}.txt', 
+        # args.retrieval_split, 
+        args.unlabeled_split
+         ], 
+        [
+            # os.path.join(args.dataset_path, args.dataset), 
+            # os.path.join(args.retrieved_path, args.dataset),
+            os.path.join(args.dataset_path, args.dataset)
+            ]
+        ]
 
     if args.seed is not None:
         random.seed(args.seed)
@@ -166,11 +196,6 @@ def main(args):
         args.world_size = int(os.environ["WORLD_SIZE"])
 
     args.distributed = args.world_size > 1 or args.multiprocessing_distributed
-
-    # If multiple GPUs are available but multiprocessing distributed is disabled, use DataParallel
-    if torch.cuda.device_count() > 1 and not args.multiprocessing_distributed:
-        print(f"Multiple GPUs detected ({torch.cuda.device_count()}). Using DataParallel.")
-        args.distributed = False
 
     ngpus_per_node = torch.cuda.device_count()
     if args.multiprocessing_distributed:
@@ -235,12 +260,8 @@ def main_worker(gpu, ngpus_per_node, args):
             # When using a single GPU per process and per
             # DistributedDataParallel, we need to divide the batch size
             # ourselves based on the total number of GPUs we have
-            # args.batch_size = int(args.batch_size / args.world_size)
-            # args.workers = int((args.workers + ngpus_per_node - 1) / ngpus_per_node)
-            if torch.cuda.device_count() > 1:
-                args.batch_size = int(args.batch_size / torch.cuda.device_count())
-                args.workers = max(1, int(args.workers / torch.cuda.device_count()))
-                print(f"Adjusted batch size: {args.batch_size}, workers: {args.workers}")
+            args.batch_size = int(args.batch_size / args.world_size)
+            args.workers = int((args.workers + ngpus_per_node - 1) / ngpus_per_node)
             model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
         else:
             model.cuda()
@@ -251,15 +272,10 @@ def main_worker(gpu, ngpus_per_node, args):
         torch.cuda.set_device(args.gpu)
         model = model.cuda(args.gpu)
         # comment out the following line for debugging
-        # raise NotImplementedError("Only DistributedDataParallel is supported.")
-        if torch.cuda.device_count() > 1:
-            print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
-            model = torch.nn.DataParallel(model)
-        else:
-            print("Running on a single GPU without DistributedDataParallel")
-    # else:
-    #     # AllGather/rank implementation in this code only supports DistributedDataParallel.
-    #     raise NotImplementedError("Only DistributedDataParallel is supported.")
+        raise NotImplementedError("Only DistributedDataParallel is supported.")
+    else:
+        # AllGather/rank implementation in this code only supports DistributedDataParallel.
+        raise NotImplementedError("Only DistributedDataParallel is supported.")
     print(model) # print model after SyncBatchNorm
 
     if args.optimizer == 'lars':
@@ -296,7 +312,6 @@ def main_worker(gpu, ngpus_per_node, args):
 
     # Data loading code
     # traindir = os.path.join(args.data, 'train')
-
     MEAN = IMAGENET_DEFAULT_MEAN if args.imgnet_pretrained else CLIP_MEAN
     STD = IMAGENET_DEFAULT_STD if args.imgnet_pretrained else CLIP_STD
 
@@ -353,17 +368,17 @@ def main_worker(gpu, ngpus_per_node, args):
         train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
         num_workers=args.workers, pin_memory=True, sampler=train_sampler, drop_last=True)
 
-    print("----------------------------\nDataloading complete. Beginning Training.\n----------------------------")
+    print("\n----------------------------Dataloading complete. Beginning Training.----------------------------\n")
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             train_sampler.set_epoch(epoch)
 
         # train for one epoch
         if epoch ==0:
-            print("---\nTraining First Epoch.\n---")
+            print("---Training First Epoch.---")
         train(train_loader, model, optimizer, scaler, summary_writer, epoch, args)
         if epoch ==0:
-            print("---\nTrained First Epoch!\n---")
+            print("---Trained First Epoch!---")
 
         if not args.multiprocessing_distributed or (args.multiprocessing_distributed
                 and args.rank == 0): # only the first GPU saves checkpoint
@@ -414,22 +429,14 @@ def train(train_loader, model, optimizer, scaler, summary_writer, epoch, args):
             loss = model(images[0], images[1], moco_m)
 
         losses.update(loss.item(), images[0].size(0))
-        # if args.rank == 0:
-        #     log_file = open(f"{args.output_dir}/training_log.txt", "a")
-        #     log_msg = f"[Epoch {epoch}, Iter {i}] Loss: {loss.item():.4f}\n"
-        #     print(log_msg, flush=True)
-        #     log_file.write(log_msg)
-        #     log_file.close()
-        #     summary_writer.add_scalar("loss", loss.item(), epoch * iters_per_epoch + i)
-
-        if not args.distributed or args.rank == 0:
+        if args.rank == 0:
             log_file = open(f"{args.output_dir}/training_log.txt", "a")
             log_msg = f"[Epoch {epoch}, Iter {i}] Loss: {loss.item():.4f}\n"
             print(log_msg, flush=True)
             log_file.write(log_msg)
             log_file.close()
             summary_writer.add_scalar("loss", loss.item(), epoch * iters_per_epoch + i)
-    
+             
         # compute gradient and do SGD step
         optimizer.zero_grad()
         scaler.scale(loss).backward()
@@ -509,39 +516,4 @@ def adjust_moco_momentum(epoch, args):
 
 
 if __name__ == '__main__':
-    print("------------------In Main------------------")
-    
-    args = parser.parse_args()
-
-    if args.output_dir:
-        Path(args.output_dir).mkdir(parents=True, exist_ok=True)
-
-    args.log_dir = os.path.join(args.output_dir, 'log')
-    Path(args.log_dir).mkdir(parents=True, exist_ok=True)
-
-    # read the dataset and retrieved path from the config.yml file
-    with open('../SWAT/config.yml') as f:
-        config = yaml.load(f, Loader=yaml.FullLoader)
-        args.dataset_path = config['dataset_path']
-        args.retrieved_path = config['retrieved_path']
-    
-    args.dataset_root = f'../SWAT/data/{args.dataset}'
-
-    print(f'args.dataset_root: {args.dataset_root}')
-    print(f'args.dataset_path: {args.dataset_path}')
-    print(f'args.retrieved_path: {args.retrieved_path}')
-
-    args.train_split = [
-        [
-        # f'fewshot{args.shots}_seed{args.seed}.txt', 
-        # args.retrieval_split, 
-        args.unlabeled_split
-         ], 
-        [
-            # os.path.join(args.dataset_path, args.dataset), 
-            # os.path.join(args.retrieved_path, args.dataset),
-            os.path.join(args.dataset_path, args.dataset)
-            ]
-        ]
-    print("------------------Main Starting------------------")
-    main(args)
+    main()

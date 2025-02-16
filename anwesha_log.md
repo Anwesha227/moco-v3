@@ -8,7 +8,7 @@ conda create --name moco_v3 python=3.8 -y
 conda activate moco_v3
 
 # Install PyTorch 1.9.0 with CUDA 10.2 support
-conda install pytorch==1.9.0 torchvision==0.10.0 torchaudio==0.9.0 cudatoolkit=10.2 -c pytorch
+pip install torch==1.9.0+cu111 torchvision==0.10.0+cu111 torchaudio==0.9.0 -f https://download.pytorch.org/whl/torch_stable.html
 
 # Install timm 0.4.9
 pip install timm==0.4.9
